@@ -43,3 +43,18 @@ def _check(value: Any) -> None:
             _check(v)
 
 
+def canonicalize(value: Any) -> bytes:
+    """Return the canonical UTF-8 byte encoding of ``value``.
+
+    ``value`` must be JSON-compatible (dict/list/str/int/float/bool/None).
+    The output is stable across processes, platforms, and Python versions.
+    """
+    _check(value)
+    text = json.dumps(
+        value,
+        ensure_ascii=False,      # emit real UTF-8, not \uXXXX escapes
+        sort_keys=True,          # deterministic key order
+        separators=(",", ":"),  # no insignificant whitespace
+        allow_nan=False,         # belt-and-suspenders with _check
+    )
+    return text.encode("utf-8")
