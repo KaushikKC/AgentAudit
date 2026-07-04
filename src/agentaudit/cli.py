@@ -82,3 +82,43 @@ def _cmd_tamper(args: argparse.Namespace) -> int:
     return 0 if not result.ok else 1
 
 
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="agentaudit", description=__doc__)
+    sub = p.add_subparsers(dest="command", required=True)
+
+    d = sub.add_parser("demo", help="record a demo session and seal it")
+    d.add_argument("-o", "--out", help="write an evidence bundle to this path")
+    d.add_argument("--anchor", choices=["witness"], default=None,
+                   help="externally anchor the sealed root (offline witness)")
+    d.set_defaults(func=_cmd_demo)
+
+    v = sub.add_parser("verify", help="verify an evidence bundle offline")
+    v.add_argument("bundle", help="path to a bundle JSON file")
+    v.set_defaults(func=_cmd_verify)
+
+    t = sub.add_parser("tamper", help="mutate a bundle and show it fail verification")
+    t.add_argument("bundle", help="path to a bundle JSON file")
+    t.add_argument("--seq", type=int, default=0, help="entry index to tamper")
+    t.set_defaults(func=_cmd_tamper)
+
+    s = sub.add_parser("serve", help="launch the local evidence dashboard")
+    s.add_argument("--db", default="agentaudit.db", help="SQLite store path (seeded if empty)")
+    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--port", type=int, default=8000)
+    s.set_defaults(func=_cmd_serve)
+    return p
+
+
+def _cmd_serve(args: argparse.Namespace) -> int:
+    from agentaudit.dashboard.server import serve
+    serve(db_path=args.db, host=args.host, port=args.port)
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
