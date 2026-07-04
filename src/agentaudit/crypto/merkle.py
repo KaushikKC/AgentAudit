@@ -103,3 +103,61 @@ def _path(m: int, leaves: List[bytes]) -> List[bytes]:
     return _path(m - k, leaves[k:]) + [merkle_root(leaves[:k])]
 
 
+def verify_inclusion(
+    index: int,
+    tree_size: int,
+    leaf_hash: bytes,
+    proof: Sequence[bytes],
+    root: bytes,
+) -> bool:
+    """Verify an inclusion proof (RFC 6962-bis 2.1.3.2), iteratively.
+
+    Recomputes the root from ``leaf_hash`` + ``proof`` and compares to ``root``.
+    """
+    if index >= tree_size:
+        return False
+    fn, sn = index, tree_size - 1
+    r = leaf_hash
+    for p in proof:
+        if sn == 0:
+            return False  # proof longer than the tree can justify
+        if (fn & 1) or (fn == sn):
+            r = hash_node(p, r)
+            if not (fn & 1):
+                while fn != 0 and not (fn & 1):
+                    fn >>= 1
+                    sn >>= 1
+        else:
+            r = hash_node(r, p)
+        fn >>= 1
+        sn >>= 1
+    return sn == 0 and _consteq(r, root)
+
+
+def consistency_proof(m: int, leaves: Sequence[bytes]) -> List[bytes]:
+    """Prove the tree of size ``m`` is a prefix of ``merkle_root(leaves)``.
+
+    RFC 6962 PROOF(m, D[n]). ``m`` must satisfy 0 <= m <= len(leaves).
+    An empty proof means the two roots are trivially consistent (m == n, or
+    m == 0 which is consistent with anything).
+    """
+    n = len(leaves)
+    if not 0 <= m <= n:
+        raise ValueError(f"m={m} out of range for tree of size {n}")
+    if m == 0 or m == n:
+        return []
+    return _subproof(m, list(leaves), True)
+
+
+def _subproof(m: int, leaves: List[bytes], b: bool) -> List[bytes]:
+    n = len(leaves)
+    if m == n:
+        # The subtree D[0:m] is fully contained. When it's the original whole
+        # tree (b=True) its root is implicit; otherwise the verifier needs it.
+        return [] if b else [merkle_root(leaves)]
+    k = _largest_power_of_two_below(n)
+    if m <= k:
+        return _subproof(m, leaves[:k], b) + [merkle_root(leaves[k:])]
+    return _subproof(m - k, leaves[k:], False) + [merkle_root(leaves[:k])]
+
+
