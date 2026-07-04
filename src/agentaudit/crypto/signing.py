@@ -102,3 +102,6 @@ class SigningKey:
         return VerifyingKey(self._key.public_key())
 
 
+def verify_signature(public_key_pem: bytes, message: bytes, signature: bytes) -> bool:
+    """Convenience: verify ``signature`` over ``message`` with a PEM public key."""
+    return VerifyingKey.from_pem(public_key_pem).verify(message, signature)
