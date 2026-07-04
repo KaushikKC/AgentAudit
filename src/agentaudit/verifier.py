@@ -189,3 +189,70 @@ def verify_anchor(
     return res
 
 
+def verify_disclosure(excerpt: Dict[str, Any]) -> VerificationResult:
+    """Verify a selective-disclosure excerpt (D3) end-to-end, offline.
+
+    Chains four checks so the revealed fields are trustworthy without exposing
+    the hidden ones:
+      1. the disclosure reconstructs the entry's committed ``content_commitment``;
+      2. the entry's ``entry_hash`` recomputes from its visible body;
+      3. that entry is included in the sealed Merkle root (inclusion proof);
+      4. the checkpoint signature is valid (if the checkpoint is signed).
+
+    On success, the revealed field values are attached to the result message.
+    """
+    res = VerificationResult(ok=True)
+    entry = excerpt["entry"]
+    sd = SelectiveDisclosure.from_dict(excerpt["disclosure"])
+
+    # 1. Disclosure reconstructs the committed content root.
+    ok_sd, revealed = _verify_sd(sd)
+    res._add(ok_sd, "selective disclosure reconstructs the committed field root")
+    res._add(
+        sd.content_root == entry.get("content_commitment"),
+        "disclosed content_root matches the entry's content_commitment",
+    )
+
+    # 2. Entry hash recomputes from the visible body (no PII needed).
+    le = LogEntry.from_dict(entry)
+    res._add(le.entry_hash == compute_entry_hash(le.signed_body()),
+             "entry hash matches its visible content")
+
+    # 3. Inclusion proof resolves to the sealed root.
+    _merge_into(res, verify_inclusion_proof(excerpt["inclusion"]))
+
+    # 4. Signature over the checkpoint, if signed.
+    cp = excerpt["inclusion"]["checkpoint"]
+    if cp.get("signature"):
+        _merge_into(res, verify_signed_checkpoint(cp))
+
+    if res.ok and revealed:
+        res.checks.append(f"revealed (authenticated) fields: {revealed}")
+    return res
+
+
+def _merge_into(into: VerificationResult, other: VerificationResult) -> None:
+    into.checks.extend(other.checks)
+    into.errors.extend(other.errors)
+    if not other.ok:
+        into.ok = False
+
+
+def verify_consistency_proof(
+    first_size: int,
+    second_size: int,
+    first_root: str,
+    second_root: str,
+    path: Sequence[str],
+) -> VerificationResult:
+    """Verify the log grew append-only from ``first_size`` to ``second_size``."""
+    res = VerificationResult(ok=True)
+    ok = merkle.verify_consistency(
+        first=first_size,
+        second=second_size,
+        first_root=bytes.fromhex(first_root),
+        second_root=bytes.fromhex(second_root),
+        proof=[bytes.fromhex(h) for h in path],
+    )
+    res._add(ok, f"log is an append-only extension ({first_size} -> {second_size})")
+    return res
