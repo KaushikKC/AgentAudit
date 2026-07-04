@@ -62,3 +62,24 @@ def _utc_now_rfc3339() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+class InclusionProof:
+    """An inclusion proof plus the signed checkpoint it resolves against."""
+
+    def __init__(self, seq: int, entry_hash: str, tree_size: int,
+                 path: List[str], checkpoint: Checkpoint) -> None:
+        self.seq = seq
+        self.entry_hash = entry_hash
+        self.tree_size = tree_size
+        self.path = path
+        self.checkpoint = checkpoint
+
+    def to_dict(self) -> dict:
+        return {
+            "seq": self.seq,
+            "entry_hash": self.entry_hash,
+            "tree_size": self.tree_size,
+            "path": self.path,
+            "checkpoint": asdict(self.checkpoint),
+        }
+
+
