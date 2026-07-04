@@ -88,3 +88,16 @@ def describe(control_id: str) -> Optional[Dict[str, str]]:
     }
 
 
+def enrich(control_ids: List[str]) -> List[Dict[str, str]]:
+    """Expand a list of control ids into full, self-describing entries.
+
+    Unknown ids are still surfaced (with ``framework: "unmapped"``) rather than
+    silently dropped -- an auditor should see everything the log referenced.
+    """
+    out: List[Dict[str, str]] = []
+    for cid in control_ids:
+        d = describe(cid)
+        if d is None:
+            d = {"id": cid, "framework": "unmapped", "title": cid, "relevance": ""}
+        out.append(d)
+    return out
