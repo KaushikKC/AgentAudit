@@ -64,3 +64,46 @@ class LocalKeyProvider(KeyProvider):
         return self._key.verifying_key().to_pem().decode()
 
 
+class EncryptedFileKeyProvider(KeyProvider):
+    """A password-encrypted Ed25519 key persisted at ``path`` (PKCS8 PEM).
+
+    Loads the key if the file exists, otherwise generates and writes one (mode
+    0600). The password is taken from ``password`` or the ``password_env``
+    environment variable -- never hard-code it.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        password: Optional[bytes] = None,
+        password_env: str = DEFAULT_KEY_PASSWORD_ENV,
+        create: bool = True,
+    ) -> None:
+        self.path = Path(path)
+        pw = password
+        if pw is None:
+            env = os.environ.get(password_env)
+            pw = env.encode() if env else None
+        if not pw:
+            raise ValueError(
+                f"a key password is required (pass password= or set ${password_env})"
+            )
+
+        if self.path.exists():
+            self._key = SigningKey.from_pem(self.path.read_bytes(), password=pw)
+        elif create:
+            self._key = SigningKey.generate()
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_bytes(self._key.to_pem(password=pw))
+            try:
+                self.path.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600
+            except OSError:  # pragma: no cover - platform dependent
+                pass
+        else:
+            raise FileNotFoundError(f"no key at {self.path} and create=False")
+
+    def sign(self, message: bytes) -> bytes:
+        return self._key.sign(message)
+
+    def public_key_pem(self) -> str:
+        return self._key.verifying_key().to_pem().decode()
