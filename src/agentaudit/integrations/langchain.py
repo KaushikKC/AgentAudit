@@ -160,3 +160,8 @@ def _llm_result_text(response: Any) -> str:
     return str(response)
 
 
+def _llm_result_model(response: Any) -> Optional[str]:
+    out = getattr(response, "llm_output", None) or {}
+    if isinstance(out, dict):
+        return out.get("model_name") or out.get("model")
+    return None
