@@ -81,3 +81,133 @@ def _classify(attrs: Mapping[str, Any]) -> EventType:
     return EventType.LLM_GENERATION
 
 
+def span_to_event(
+    name: str,
+    attributes: Mapping[str, Any],
+    span_events: Optional[Sequence[Mapping[str, Any]]] = None,
+    framework: Optional[str] = None,
+    redact_content: bool = True,
+) -> Optional[AuditEvent]:
+    """Map one OTel GenAI span to an :class:`AuditEvent` (or None to skip).
+
+    ``span_events`` is an optional list of ``{"attributes": {...}}`` (OTel span
+    events), where prompt/completion content increasingly lives.
+    """
+    attrs = dict(attributes or {})
+    # Only audit GenAI/agent spans; ignore unrelated infrastructure spans.
+    is_gen_ai = any(k.startswith("gen_ai.") for k in attrs) or bool(framework)
+    if not is_gen_ai:
+        return None
+
+    # Prompt/completion may be attributes or ride on span events.
+    prompt = attrs.get(GEN_AI["prompt"])
+    completion = attrs.get(GEN_AI["completion"])
+    for ev in span_events or ():
+        ev_attrs = ev.get("attributes", {}) if isinstance(ev, Mapping) else {}
+        prompt = prompt or ev_attrs.get(GEN_AI["prompt"])
+        completion = completion or ev_attrs.get(GEN_AI["completion"])
+
+    model = attrs.get(GEN_AI["response_model"]) or attrs.get(GEN_AI["request_model"])
+    agent_id = (
+        attrs.get(GEN_AI["agent_name"])
+        or attrs.get(GEN_AI["agent_id"])
+        or attrs.get(GEN_AI["tool_name"])
+        or name
+    )
+
+    input_field: Dict[str, Any] = {}
+    if attrs.get(GEN_AI["tool_name"]):
+        input_field["tool"] = attrs[GEN_AI["tool_name"]]
+    content_in = _content_field(prompt, redact_content)
+    if content_in:
+        input_field["prompt"] = content_in
+    if attrs.get(GEN_AI["input_tokens"]) is not None:
+        input_field["input_tokens"] = attrs[GEN_AI["input_tokens"]]
+
+    output_field: Dict[str, Any] = {}
+    content_out = _content_field(completion, redact_content)
+    if content_out:
+        output_field["completion"] = content_out
+    if attrs.get(GEN_AI["finish_reasons"]) is not None:
+        output_field["finish_reasons"] = attrs[GEN_AI["finish_reasons"]]
+    if attrs.get(GEN_AI["output_tokens"]) is not None:
+        output_field["output_tokens"] = attrs[GEN_AI["output_tokens"]]
+
+    return AuditEvent(
+        event_type=_classify(attrs),
+        actor=Actor(
+            agent_id=str(agent_id),
+            framework=framework or attrs.get(GEN_AI["system"]),
+            model=model,
+        ),
+        input=input_field or None,
+        output=output_field or None,
+    )
+
+
+# --- OTel SpanExporter ------------------------------------------------------
+try:  # keep the SDK an optional dependency
+    from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
+
+    _HAVE_OTEL = True
+except Exception:  # pragma: no cover - exercised only without the SDK
+    SpanExporter = object  # type: ignore
+    SpanExportResult = None  # type: ignore
+    _HAVE_OTEL = False
+
+
+class AuditSpanExporter(SpanExporter):  # type: ignore[misc]
+    """An OTel ``SpanExporter`` that writes GenAI spans into an ``AuditLog``.
+
+    Usage::
+
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(AuditSpanExporter(log)))
+    """
+
+    def __init__(
+        self,
+        log: AuditLog,
+        framework: Optional[str] = None,
+        redact_content: bool = True,
+    ) -> None:
+        if not _HAVE_OTEL:  # pragma: no cover
+            raise RuntimeError(
+                "opentelemetry-sdk is required for AuditSpanExporter "
+                "(pip install 'agentaudit[otel]')"
+            )
+        self.log = log
+        self.framework = framework
+        self.redact_content = redact_content
+        self.recorded: List[str] = []  # event_ids recorded, for introspection/tests
+
+    def export(self, spans: Sequence[Any]) -> Any:
+        try:
+            for span in spans:
+                event = span_to_event(
+                    name=getattr(span, "name", ""),
+                    attributes=dict(getattr(span, "attributes", {}) or {}),
+                    span_events=[
+                        {"attributes": dict(getattr(e, "attributes", {}) or {})}
+                        for e in getattr(span, "events", []) or []
+                    ],
+                    framework=self.framework,
+                    redact_content=self.redact_content,
+                )
+                if event is None:
+                    continue
+                # Content is already hashed when redact_content; no extra keys.
+                entry = self.log.record(event)
+                self.recorded.append(entry.event_id)
+            return SpanExportResult.SUCCESS
+        except Exception:  # pragma: no cover - defensive; never crash the app
+            return SpanExportResult.FAILURE
+
+    def shutdown(self) -> None:  # noqa: D401
+        return None
+
+    def force_flush(self, timeout_millis: int = 30_000) -> bool:
+        return True
