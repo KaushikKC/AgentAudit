@@ -124,3 +124,43 @@ class SelectiveDisclosure:
         )
 
 
+def make_disclosure(sealed: Sealed, reveal_paths: Sequence[str]) -> SelectiveDisclosure:
+    """Produce an excerpt revealing ``reveal_paths`` and hiding everything else."""
+    reveal = set(reveal_paths)
+    unknown = reveal - set(sealed.order)
+    if unknown:
+        raise KeyError(f"unknown field paths: {sorted(unknown)}")
+
+    revealed: Dict[str, Dict[str, Any]] = {}
+    hidden: Dict[str, str] = {}
+    for p in sealed.order:
+        if p in reveal:
+            revealed[p] = {"value": sealed.fields[p], "salt": sealed.salts[p]}
+        else:
+            hidden[p] = leaf_hash(p, sealed.fields[p], sealed.salts[p]).hex()
+    return SelectiveDisclosure(
+        content_root=sealed.content_root, order=sealed.order,
+        revealed=revealed, hidden=hidden,
+    )
+
+
+def verify_disclosure(sd: SelectiveDisclosure) -> Tuple[bool, Dict[str, Any]]:
+    """Verify an excerpt against its ``content_root``.
+
+    Returns ``(ok, revealed_values)``. ``ok`` is True iff the revealed fields and
+    hidden leaf hashes reconstruct exactly the committed Merkle root -- i.e. the
+    revealed values are authentic and provably part of the committed record.
+    """
+    leaves: List[bytes] = []
+    for p in sd.order:
+        if p in sd.revealed:
+            r = sd.revealed[p]
+            leaves.append(leaf_hash(p, r["value"], r["salt"]))
+        elif p in sd.hidden:
+            leaves.append(bytes.fromhex(sd.hidden[p]))
+        else:
+            return False, {}  # a field neither revealed nor accounted for
+    root = merkle.merkle_root(leaves).hex()
+    if root != sd.content_root:
+        return False, {}
+    return True, {p: sd.revealed[p]["value"] for p in sd.revealed}
