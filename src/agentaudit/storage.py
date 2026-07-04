@@ -194,3 +194,13 @@ class SQLiteStore(StorageBackend):
         self.close()
 
 
+def _row_to_checkpoint(row: sqlite3.Row) -> Checkpoint:
+    return Checkpoint(
+        session_id=row["session_id"],
+        tree_size=row["tree_size"],
+        root_hash=row["root_hash"],
+        timestamp=row["timestamp"],
+        signature=row["signature"],
+        public_key=row["public_key"],
+        anchor=row["anchor"],
+    )
