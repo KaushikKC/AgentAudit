@@ -102,3 +102,90 @@ def verify_chain(
     return res
 
 
+def verify_signed_checkpoint(
+    checkpoint: Dict[str, Any],
+) -> VerificationResult:
+    """Verify an Ed25519 signature over a checkpoint body (root + metadata)."""
+    from agentaudit.crypto.canonical import canonicalize
+
+    res = VerificationResult(ok=True)
+    sig = checkpoint.get("signature")
+    pem = checkpoint.get("public_key")
+    if not sig or not pem:
+        res._add(False, "checkpoint is unsigned")
+        return res
+    body = canonicalize({
+        "session_id": checkpoint["session_id"],
+        "tree_size": checkpoint["tree_size"],
+        "root_hash": checkpoint["root_hash"],
+        "timestamp": checkpoint["timestamp"],
+    })
+    vk = VerifyingKey.from_pem(pem.encode() if isinstance(pem, str) else pem)
+    res._add(
+        vk.verify(body, bytes.fromhex(sig)),
+        f"checkpoint signature valid (tree_size={checkpoint['tree_size']})",
+    )
+    return res
+
+
+def verify_inclusion_proof(proof: Dict[str, Any]) -> VerificationResult:
+    """Verify an inclusion proof dict (as produced by AuditLog.inclusion_proof)."""
+    res = VerificationResult(ok=True)
+    cp = proof["checkpoint"]
+    ok = merkle.verify_inclusion(
+        index=proof["seq"],
+        tree_size=proof["tree_size"],
+        leaf_hash=merkle.hash_leaf(bytes.fromhex(proof["entry_hash"])),
+        proof=[bytes.fromhex(h) for h in proof["path"]],
+        root=bytes.fromhex(cp["root_hash"]),
+    )
+    res._add(ok, f"inclusion proof for entry[{proof['seq']}] resolves to sealed root")
+    return res
+
+
+def verify_anchor(
+    anchor_json: str,
+    trusted_witness_keys: Optional[Sequence[str]] = None,
+    trusted_rekor_key: Optional[str] = None,
+    online: bool = False,
+) -> VerificationResult:
+    """Verify an external anchor receipt (as stored on a checkpoint).
+
+    Witness receipts verify offline (optionally pinned to ``trusted_witness_keys``).
+    Rekor receipts verify **offline** too when the SET material is present -- the
+    signed entry timestamp is checked against Rekor's log key (pin it via
+    ``trusted_rekor_key``); ``online=True`` forces a re-fetch instead.
+    """
+    from agentaudit.anchoring.base import AnchorReceipt
+    from agentaudit.anchoring.witness import verify_witness_receipt
+
+    res = VerificationResult(ok=True)
+    receipt = AnchorReceipt.from_json(anchor_json)
+    p = receipt.proof
+
+    if receipt.backend == "witness":
+        ok = verify_witness_receipt(receipt, trusted_keys=trusted_witness_keys)
+        note = "" if trusted_witness_keys is not None else " (key not pinned)"
+        res._add(ok, f"witness anchor cosignature valid{note}")
+    elif receipt.backend == "rekor":
+        from agentaudit.anchoring.rekor import verify_rekor_receipt
+
+        has_set = bool(p.get("signed_entry_timestamp") and p.get("body")
+                       and (p.get("rekor_public_key") or trusted_rekor_key))
+        if has_set and not online:
+            ok = verify_rekor_receipt(receipt, trusted_rekor_key=trusted_rekor_key)
+            note = "" if trusted_rekor_key else " (Rekor key not pinned)"
+            res._add(ok, f"rekor SET verified offline against log key{note} "
+                         f"(logIndex={p.get('log_index')})")
+        elif online:
+            res._add(verify_rekor_receipt(receipt, online=True),
+                     f"rekor entry re-fetched and matches (logIndex={p.get('log_index')})")
+        else:
+            res.checks.append(
+                f"rekor anchor present (logIndex={p.get('log_index')}); "
+                "no SET material to verify offline")
+    else:
+        res._add(False, f"unknown anchor backend: {receipt.backend}")
+    return res
+
+
