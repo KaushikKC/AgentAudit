@@ -346,3 +346,16 @@ class AuditLog:
         return self.store.entries(self.session_id)
 
 
+def _checkpoint_signing_bytes(cp: Checkpoint) -> bytes:
+    """The exact bytes an Ed25519 signature covers for a checkpoint.
+
+    Kept explicit and minimal so the verifier can reproduce it byte-for-byte.
+    """
+    from agentaudit.crypto.canonical import canonicalize
+
+    return canonicalize({
+        "session_id": cp.session_id,
+        "tree_size": cp.tree_size,
+        "root_hash": cp.root_hash,
+        "timestamp": cp.timestamp,
+    })
