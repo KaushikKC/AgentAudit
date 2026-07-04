@@ -98,3 +98,8 @@ def verify_bundle(bundle: Dict[str, Any]) -> VerificationResult:
     return result
 
 
+def _merge(into: VerificationResult, other: VerificationResult) -> None:
+    into.checks.extend(other.checks)
+    into.errors.extend(other.errors)
+    if not other.ok:
+        into.ok = False
