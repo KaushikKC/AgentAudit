@@ -161,3 +161,105 @@ def _subproof(m: int, leaves: List[bytes], b: bool) -> List[bytes]:
     return _subproof(m - k, leaves[k:], False) + [merkle_root(leaves[:k])]
 
 
+def verify_consistency(
+    first: int,
+    second: int,
+    first_root: bytes,
+    second_root: bytes,
+    proof: Sequence[bytes],
+) -> bool:
+    """Verify a consistency proof (RFC 6962-bis 2.1.4.2), iteratively."""
+    if first > second:
+        return False
+    if first == second:
+        return len(proof) == 0 and _consteq(first_root, second_root)
+    if first == 0:
+        # Empty prior tree is consistent with any later tree; nothing to prove.
+        return len(proof) == 0
+
+    path = list(proof)
+    # If `first` is a power of two, its root is implicit and prepended.
+    if first & (first - 1) == 0:
+        path = [first_root] + path
+    if not path:
+        return False
+
+    fn, sn = first - 1, second - 1
+    while fn & 1:
+        fn >>= 1
+        sn >>= 1
+
+    fr = sr = path[0]
+    for c in path[1:]:
+        if sn == 0:
+            return False
+        if (fn & 1) or (fn == sn):
+            fr = hash_node(c, fr)
+            sr = hash_node(c, sr)
+            if not (fn & 1):
+                while fn != 0 and not (fn & 1):
+                    fn >>= 1
+                    sn >>= 1
+        else:
+            sr = hash_node(sr, c)
+        fn >>= 1
+        sn >>= 1
+
+    return sn == 0 and _consteq(fr, first_root) and _consteq(sr, second_root)
+
+
+def _consteq(a: bytes, b: bytes) -> bool:
+    """Constant-time comparison; hashes are public but habit is good."""
+    return hmac.compare_digest(a, b)
+
+
+class IncrementalMerkleTree:
+    """An append-only Merkle tree that keeps the RFC 6962 root in O(log n)/append.
+
+    Recomputing :func:`merkle_root` over the whole leaf set on every append is
+    O(n) per call -- O(n^2) to ingest n events. Instead we keep the tree's
+    *frontier*: the roots of the maximal perfect subtrees (a Merkle Mountain
+    Range), stored largest-first. Appending a leaf carries like a binary counter,
+    touching only O(log n) nodes, and the root folds the frontier the way RFC
+    6962's MTH decomposes ``n`` into its set bits.
+
+    The full leaf list is retained too, so inclusion/consistency proofs (not on
+    the hot path) still use the audited recursive functions above. The root here
+    is asserted equal to ``merkle_root(leaves)`` by property tests.
+    """
+
+    __slots__ = ("_leaves", "_peaks")
+
+    def __init__(self, leaves: Sequence[bytes] | None = None) -> None:
+        self._leaves: List[bytes] = []
+        self._peaks: List[tuple[int, bytes]] = []  # (height, hash), height-descending
+        for leaf in leaves or ():
+            self.append(leaf)
+
+    def append(self, leaf_hash: bytes) -> None:
+        self._leaves.append(leaf_hash)
+        height, node = 0, leaf_hash
+        # Merge with equal-height peaks from the small end (older leaves on left).
+        while self._peaks and self._peaks[-1][0] == height:
+            _, left = self._peaks.pop()
+            node = hash_node(left, node)
+            height += 1
+        self._peaks.append((height, node))
+
+    @property
+    def size(self) -> int:
+        return len(self._leaves)
+
+    @property
+    def leaves(self) -> List[bytes]:
+        return self._leaves
+
+    def root(self) -> bytes:
+        if not self._peaks:
+            return _EMPTY_ROOT
+        # Fold peaks right-to-left: smaller (later) subtrees nest inside larger.
+        rev = reversed(self._peaks)
+        _, acc = next(rev)
+        for _, node in rev:
+            acc = hash_node(node, acc)
+        return acc
