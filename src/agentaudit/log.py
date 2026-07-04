@@ -58,3 +58,7 @@ class SealPolicy:
     every_seconds: Optional[float] = None
 
 
+def _utc_now_rfc3339() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
