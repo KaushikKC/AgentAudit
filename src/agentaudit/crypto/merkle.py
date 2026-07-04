@@ -67,3 +67,39 @@ def _largest_power_of_two_below(n: int) -> int:
     return 1 << ((n - 1).bit_length() - 1)
 
 
+def merkle_root(leaves: Sequence[bytes]) -> bytes:
+    """Merkle Tree Hash (MTH) over already-hashed leaves.
+
+    ``leaves`` are leaf *hashes* (output of :func:`hash_leaf`).
+    """
+    n = len(leaves)
+    if n == 0:
+        return _EMPTY_ROOT
+    if n == 1:
+        return leaves[0]
+    k = _largest_power_of_two_below(n)
+    return hash_node(merkle_root(leaves[:k]), merkle_root(leaves[k:]))
+
+
+def inclusion_proof(index: int, leaves: Sequence[bytes]) -> List[bytes]:
+    """Audit path proving ``leaves[index]`` is committed by ``merkle_root(leaves)``.
+
+    Returns the list of sibling hashes from the leaf up to (but excluding) the
+    root -- RFC 6962 PATH(m, D[n]).
+    """
+    n = len(leaves)
+    if not 0 <= index < n:
+        raise IndexError(f"index {index} out of range for tree of size {n}")
+    return _path(index, list(leaves))
+
+
+def _path(m: int, leaves: List[bytes]) -> List[bytes]:
+    n = len(leaves)
+    if n == 1:
+        return []
+    k = _largest_power_of_two_below(n)
+    if m < k:
+        return _path(m, leaves[:k]) + [merkle_root(leaves[k:])]
+    return _path(m - k, leaves[k:]) + [merkle_root(leaves[:k])]
+
+
