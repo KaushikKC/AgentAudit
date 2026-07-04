@@ -108,3 +108,89 @@ CREATE TRIGGER IF NOT EXISTS entries_no_delete
 """
 
 
+class SQLiteStore(StorageBackend):
+    """Insert-only SQLite persistence for one or more audit sessions."""
+
+    def __init__(self, path: str | Path = ":memory:", check_same_thread: bool = False) -> None:
+        self.path = str(path)
+        # Thread-safe by default: a shared connection guarded by an internal lock,
+        # so background sealers and the dashboard's worker threads are all safe.
+        self._conn = sqlite3.connect(self.path, check_same_thread=check_same_thread)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.executescript(_SCHEMA)
+        self._conn.commit()
+        self._lock = threading.RLock()
+
+    # -- entries -----------------------------------------------------------
+    def append_entry(self, entry: LogEntry) -> None:
+        body = json.dumps(entry.signed_body() | {"entry_hash": entry.entry_hash})
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO entries (session_id, seq, entry_hash, body) VALUES (?,?,?,?)",
+                (entry.session_id, entry.seq, entry.entry_hash, body),
+            )
+            self._conn.commit()
+
+    def last_seq(self, session_id: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MAX(seq) AS m FROM entries WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        return -1 if row["m"] is None else row["m"]
+
+    def iter_entries(self, session_id: str) -> Iterator[LogEntry]:
+        return iter(self.entries(session_id))
+
+    def entries(self, session_id: str) -> List[LogEntry]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT body FROM entries WHERE session_id = ? ORDER BY seq ASC",
+                (session_id,),
+            ).fetchall()
+        return [LogEntry.from_dict(json.loads(r["body"])) for r in rows]
+
+    def sessions(self) -> List[str]:
+        with self._lock:
+            rows = self._conn.execute("SELECT DISTINCT session_id FROM entries").fetchall()
+        return [r["session_id"] for r in rows]
+
+    # -- checkpoints -------------------------------------------------------
+    def append_checkpoint(self, cp: Checkpoint) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO checkpoints "
+                "(session_id, tree_size, root_hash, timestamp, signature, public_key, anchor) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (cp.session_id, cp.tree_size, cp.root_hash, cp.timestamp,
+                 cp.signature, cp.public_key, cp.anchor),
+            )
+            self._conn.commit()
+
+    def latest_checkpoint(self, session_id: str) -> Optional[Checkpoint]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM checkpoints WHERE session_id = ? "
+                "ORDER BY tree_size DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        return _row_to_checkpoint(row) if row else None
+
+    def checkpoints(self, session_id: str) -> List[Checkpoint]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM checkpoints WHERE session_id = ? ORDER BY tree_size ASC",
+                (session_id,),
+            ).fetchall()
+        return [_row_to_checkpoint(r) for r in rows]
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+    def __enter__(self) -> "SQLiteStore":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
