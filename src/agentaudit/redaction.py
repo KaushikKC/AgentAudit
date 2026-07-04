@@ -88,3 +88,39 @@ class Sealed:
     salts: Dict[str, str]             # path -> hex salt   (SECRET)
 
 
+def seal_fields(fields: Dict[str, Any]) -> Sealed:
+    """Commit to ``fields`` with a salted per-field Merkle root."""
+    order = sorted(fields)
+    salts = {p: secrets.token_hex(_SALT_BYTES) for p in order}
+    leaves = [leaf_hash(p, fields[p], salts[p]) for p in order]
+    root = merkle.merkle_root(leaves).hex()
+    return Sealed(content_root=root, order=order, fields=dict(fields), salts=salts)
+
+
+@dataclass
+class SelectiveDisclosure:
+    """A verifiable excerpt: some fields revealed, the rest committed-but-hidden."""
+
+    content_root: str
+    order: List[str]
+    revealed: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # path -> {value, salt}
+    hidden: Dict[str, str] = field(default_factory=dict)              # path -> leaf hash hex
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "content_root": self.content_root,
+            "order": self.order,
+            "revealed": self.revealed,
+            "hidden": self.hidden,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "SelectiveDisclosure":
+        return cls(
+            content_root=d["content_root"],
+            order=list(d["order"]),
+            revealed=dict(d.get("revealed", {})),
+            hidden=dict(d.get("hidden", {})),
+        )
+
+
