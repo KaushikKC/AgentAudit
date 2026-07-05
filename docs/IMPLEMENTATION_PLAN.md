@@ -149,6 +149,55 @@ location the operator can't backdate gives **provable time + third-party non-rep
 
 ---
 
+## 🎯 Production readiness roadmap (next major phase — agreed 2026-07-04)
+
+The cryptographic core, all five differentiators (D1–D5), external anchoring (witness + Rekor,
+both offline-verifiable), the live dashboard, the O(n²)→O(n) performance work, and the first pass
+of operational hardening (KeyProvider, SealPolicy, thread-safe pluggable storage) are DONE. The
+items below are what remains to make AgentAudit a fully production-grade, deployable product. This
+section is the canonical future plan; the Tier 2/3 lists above feed into it.
+
+**1. Storage & durability (highest priority)**
+- Postgres backend with DB-level immutability (triggers/rules), behind the existing `StorageBackend`.
+- S3 Object Lock (WORM) object store for large payloads.
+- Backups, replication, retention & legal-hold policies, cold archival.
+- Right-to-erasure reconciliation: erase the PII payload while KEEPING the commitment (D3 makes
+  this possible; the lifecycle tooling does not exist yet).
+
+**2. Ingestion at scale**
+- Out-of-process collector service (HTTP + gRPC) with auth, batching, backpressure, idempotency.
+  (Today ingestion is in-process SDK only; the dashboard server is a starting point.)
+- Batched commits (per-record SQLite commit is the current throughput ceiling), sharding by
+  session, multi-writer support.
+
+**3. Key management & crypto hardening**
+- Real KMS/HSM `KeyProvider`s: AWS KMS, GCP KMS, HashiCorp Vault.
+- Automated key rotation + forward-secure key ratcheting (rotate/erase per-segment key after each
+  seal so a future key compromise can't forge past entries).
+- Full offline Rekor inclusion-proof verification against a monitored Signed Tree Head (today we
+  verify the SET, Rekor's inclusion promise, not the full proof); Rekor log monitoring/witnessing.
+
+**4. Security & compliance**
+- Formal threat-model doc, dependency scanning, SBOM, signed releases, parser fuzzing, external
+  security review.
+- Multi-tenancy, authn/authz, RBAC over who can read reasoning/PII, access logging (audit-of-audit).
+- Deeper D2: complete control mappings, per-regulation evidence templates, exportable compliance
+  reports, data-residency controls.
+
+**5. Operations & reliability**
+- Self-observability: Prometheus metrics, health/readiness endpoints, alerting on seal/anchor failure.
+- Retry/backoff + dead-letter for anchoring, graceful shutdown, faster crash recovery (cache
+  rebuild is O(n) on restart).
+- Dashboard hardening: auth, TLS, pagination, RBAC (it is a local unauthenticated dev tool today).
+
+**6. Ecosystem & distribution**
+- PyPI release with semver, changelog, versioned bundle format + migrations.
+- Dependency-free standalone verifier binary (Rust or Go); JS/TS SDK for Node agents; native
+  AutoGen / OpenAI Agents SDK adapters.
+- Docker image, Helm chart, hosted docs site.
+
+---
+
 ## Known technical debt (⚠️)
 - Key *rotation* still manual (encrypted-at-rest + KMS path now exist via `KeyProvider`); forward-secure ratcheting not yet built.
 - SQLite triggers are app-level WORM only; real immutability needs object-lock storage.
