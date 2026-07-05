@@ -137,3 +137,95 @@ Prompt/tool **content is hashed by default**, so switching on auditing never tur
 traces into a PII liability. Install only what you use: `pip install "agentaudit[otel]"`
 (or `[langchain]`, `[crewai]`, `[all]`).
 
+## Selective disclosure — prove a field without leaking the rest (D3)
+
+Real audit data is full of PII. AgentAudit commits each field under a **salted per-field
+Merkle root**, so you can later reveal exactly one field and prove it's authentic and in the
+log — while every other field stays sealed and unguessable:
+
+```python
+log.record(AuditEvent(..., input={"name": "Jane", "dob": "1990-05-01",
+                                  "document_id": "P1234567"}), redact_keys=["input"])
+log.seal()
+
+excerpt = log.make_disclosure(seq=0, reveal_paths=["input.document_id"])
+
+from agentaudit.verifier import verify_disclosure
+verify_disclosure(excerpt).ok      # True — document_id proven, name & dob never revealed
+```
+
+The exported bundle contains **no raw PII at all** — only the commitment — yet remains fully
+verifiable. This directly answers the enterprise objection "we can't put customer data in
+your tool."
+
+## External anchoring — provable time, third-party non-repudiation
+
+Local signing proves *who* vouched for a root; anchoring proves it to someone the operator
+can't overrule. `seal(anchor=...)` commits the sealed Merkle root to an external backend:
+
+```python
+from agentaudit.anchoring import WitnessLog        # independent, offline-verifiable cosigner
+checkpoint = log.seal(anchor=WitnessLog())
+
+# or a public transparency log (provable time from a public good):
+from agentaudit.anchoring.rekor import RekorAnchor
+checkpoint = log.seal(anchor=RekorAnchor(signing_key))   # writes a permanent public entry
+```
+
+The witness backend attests to each root with an *independent* key and verifies fully offline
+(pin its published key). The Rekor backend records the root in Sigstore's public log and stamps
+it with provable time. Either receipt travels inside the evidence bundle. `python
+examples/anchoring_demo.py` shows the full flow.
+
+## Architecture
+
+```
+   Instrumented agent (any framework)  ──emits──▶  AgentAudit SDK
+   LangChain / CrewAI / AutoGen / ...              (in-process, thin)
+                                                        │
+                        canonical serialize + hash-chain │
+                                                        ▼
+   Storage (append-only / WORM)  ◀──  Audit Log Engine  ──▶  External Anchor
+   SQLite triggers / Postgres          hash chain             Rekor / RFC-3161
+   / object-lock store                 Merkle builder         (roadmap)
+                                       Ed25519 signer
+                                                        │
+                                                        ▼
+                        Verifier + Evidence Exporter
+                        · verify inclusion/consistency offline
+                        · export regulator-ready bundle (events + proofs)
+                        · map events → EU AI Act / NIST / ISO 42001 controls
+```
+
+## Package layout
+
+| Module | Responsibility |
+|---|---|
+| `agentaudit.crypto.canonical` | Deterministic (RFC 8785-style) JSON so hashes are reproducible |
+| `agentaudit.crypto.merkle` | RFC 6962 Merkle tree — inclusion & consistency proofs |
+| `agentaudit.crypto.signing` | Ed25519 sign / verify, key management |
+| `agentaudit.schema` | `AuditEvent`, `LogEntry`, `PolicyRef` — the data model |
+| `agentaudit.storage` | Append-only SQLite (WORM-style triggers) |
+| `agentaudit.log` | The `AuditLog` engine: record → seal → prove |
+| `agentaudit.verifier` | **Offline**, trust-nothing verification |
+| `agentaudit.controls` | Regulatory control catalog (EU AI Act / NIST / ISO) + bundle enrichment |
+| `agentaudit.redaction` | **Selective disclosure (D3)** — salted per-field Merkle commitments |
+| `agentaudit.anchoring` | **External anchoring** — independent witness cosigning + Sigstore Rekor |
+| `agentaudit.integrations` | **Framework adapters (D1)** — OTel exporter, LangChain, CrewAI |
+| `agentaudit.bundle` | Self-contained evidence bundle: export + verify |
+| `agentaudit.dashboard` | Local web dashboard (`agentaudit serve`) — live-verified, no extra deps |
+| `agentaudit.cli` | `agentaudit demo | verify | tamper | serve` |
+
+## Roadmap
+
+| | Differentiator | Status |
+|---|---|---|
+| **D1** | OpenTelemetry-native instrumentation (LangChain + CrewAI adapters + neutral OTel exporter) | ✅ `agentaudit.integrations` |
+| **D2** | Regulation-mapped evidence export (EU AI Act / NIST AI RMF / ISO 42001) | ✅ control catalog + self-describing bundle |
+| **D3** | Selective-disclosure proofs: prove a field without revealing the rest | ✅ `agentaudit.redaction` + `verify_disclosure` |
+| **D4** | KYC reference demo producing a regulator-ready bundle | ✅ `examples/kyc_demo.py` |
+| **D5** | Offline, trust-nothing verifier | ✅ `agentaudit verify` / `verify_bundle` |
+| — | External anchoring: independent witness (offline) + Sigstore Rekor | ✅ `agentaudit.anchoring` |
+| — | AutoGen / OpenAI Agents SDK adapters | ⏳ (OTel exporter already covers any GenAI-instrumented stack) |
+| — | RFC-3161 TSA anchor · forward-secure key ratcheting · dashboard | ⏳ |
+
