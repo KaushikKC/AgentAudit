@@ -47,3 +47,37 @@ def statement_bytes(statement: Dict[str, Any]) -> bytes:
     return canonicalize(statement)
 
 
+@dataclass
+class AnchorReceipt:
+    """Portable proof that a Merkle root was externally anchored."""
+
+    backend: str                       # "witness" | "rekor" | ...
+    root_hash: str                     # the checkpoint root that was anchored
+    anchored_at: str                   # external trusted time (RFC3339)
+    proof: Dict[str, Any] = field(default_factory=dict)  # backend-specific
+    offline_verifiable: bool = False   # True iff verifiable without a network
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), sort_keys=True)
+
+    @classmethod
+    def from_json(cls, text: str) -> "AnchorReceipt":
+        d = json.loads(text)
+        return cls(
+            backend=d["backend"],
+            root_hash=d["root_hash"],
+            anchored_at=d["anchored_at"],
+            proof=d.get("proof", {}),
+            offline_verifiable=d.get("offline_verifiable", False),
+        )
+
+
+class AnchorBackend(abc.ABC):
+    """A place to anchor sealed Merkle roots."""
+
+    name: str = "anchor"
+
+    @abc.abstractmethod
+    def submit(self, checkpoint: Checkpoint) -> AnchorReceipt:
+        """Anchor ``checkpoint``'s root externally and return a receipt."""
+        raise NotImplementedError
