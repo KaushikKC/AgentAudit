@@ -91,3 +91,20 @@ def make_handler(data: DashboardData):
     return Handler
 
 
+def serve(db_path: str = "agentaudit.db", host: str = "127.0.0.1", port: int = 8000,
+          seed_if_empty: bool = True) -> None:
+    store = SQLiteStore(db_path, check_same_thread=False)
+    if seed_if_empty and not store.sessions():
+        seed_demo(store)
+    data = DashboardData(store)
+    httpd = ThreadingHTTPServer((host, port), make_handler(data))
+    print(f"AgentAudit dashboard → http://{host}:{port}  (db: {db_path}, "
+          f"{len(store.sessions())} sessions)")
+    print("Press Ctrl+C to stop.")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped.")
+    finally:
+        httpd.server_close()
+        store.close()
