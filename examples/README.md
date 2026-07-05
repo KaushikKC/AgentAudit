@@ -58,6 +58,23 @@ python examples/langchain_kyc_demo.py           # deterministic fake model, no A
 ANTHROPIC_API_KEY=... python examples/langchain_kyc_demo.py   # real Claude (needs langchain-anthropic)
 ```
 
+## Live end-to-end flow (`live_kyc_stream.py` + the dashboard)
+
+See the system work for real — an agent processing a stream of applicants, each run recorded
+to disk, appearing live in the dashboard (not seeded demo data). Two terminals:
+
+```bash
+# terminal 1 — the agent keeps working, logging real sessions to live.db
+python examples/live_kyc_stream.py --db live.db --interval 3
+
+# terminal 2 — watch them appear, verify, and (if you tamper) fail
+python -m agentaudit.cli serve --db live.db --no-seed
+#   open http://127.0.0.1:8000  — the sidebar auto-refreshes as new sessions land
+```
+
+Every session is a genuine `verify_bundle` result on data the agent just produced; **Simulate
+tamper** runs a real re-verification. `--no-seed` keeps the dashboard showing only real runs.
+
 ## Production hardening (`production_hardening_demo.py`)
 
 The operational features for actually running the engine: a signing key **encrypted at rest**
