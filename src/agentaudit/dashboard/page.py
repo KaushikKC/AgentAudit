@@ -63,6 +63,10 @@ INDEX_HTML = r"""<!doctype html>
   .check.pass::before{content:"✓ ";color:var(--ok)} .check.fail::before{content:"✗ ";color:var(--bad)}
   details summary{cursor:pointer;color:var(--muted);font-size:12px}
   .muted{color:var(--muted)}
+  .live{float:right;font-size:10px;color:var(--muted);display:inline-flex;align-items:center;gap:5px}
+  .livedot{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 0 var(--ok);animation:pulse 1.8s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(46,204,113,.5)}70%{box-shadow:0 0 0 6px rgba(46,204,113,0)}100%{box-shadow:0 0 0 0 rgba(46,204,113,0)}}
+  @media(prefers-reduced-motion:reduce){.livedot{animation:none}}
 </style>
 </head>
 <body>
@@ -74,7 +78,10 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 </header>
 <div class="wrap">
-  <aside class="side"><h2>Sessions</h2><div id="sessions"></div></aside>
+  <aside class="side">
+    <h2>Sessions <span class="live"><span class="livedot"></span><span id="livecount">…</span></span></h2>
+    <div id="sessions"></div>
+  </aside>
   <main id="main"><div class="empty">Select a session to inspect its evidence.</div></main>
 </div>
 <script>
@@ -92,23 +99,36 @@ function anchorHtml(a){
   return `${esc(a.backend)} · <span class="muted">${esc(a.anchored_at||"")}</span>`;
 }
 
-async function loadSessions(){
+let tampering = false;
+let lastSig = "";   // fingerprint of the session list, to detect changes
+
+async function loadSessions(initial){
   const rows = await get("/api/sessions");
-  $("#sessions").innerHTML = rows.map(s=>`
-    <div class="sess" data-id="${esc(s.session_id)}">
-      <div class="name">${esc(s.agent_id)}</div>
-      <div class="meta">${s.event_count} events · ${esc(short(s.root_hash))}</div>
-      <div class="badges">
-        ${s.signed?'<span class="badge ok">signed</span>':'<span class="badge">unsigned</span>'}
-        ${s.anchor?`<span class="badge anchor">${esc(s.anchor.backend)}</span>`:''}
-        ${s.framework?`<span class="badge">${esc(s.framework)}</span>`:''}
-      </div>
-    </div>`).join("") || '<div class="empty" style="margin-top:20px">No sessions yet.</div>';
-  document.querySelectorAll(".sess").forEach(el=>
-    el.onclick=()=>{ current=el.dataset.id;
-      document.querySelectorAll(".sess").forEach(x=>x.classList.toggle("active",x===el));
-      loadSession(current); });
-  if(rows[0]){ current=rows[0].session_id; $(".sess").classList.add("active"); loadSession(current); }
+  const sig = rows.map(s=>s.session_id+":"+s.event_count).join("|");
+  if(sig !== lastSig){                      // only re-render when something changed
+    lastSig = sig;
+    $("#sessions").innerHTML = rows.map(s=>`
+      <div class="sess ${s.session_id===current?'active':''}" data-id="${esc(s.session_id)}">
+        <div class="name">${esc(s.agent_id)}</div>
+        <div class="meta">${s.event_count} events · ${esc(short(s.root_hash))}</div>
+        <div class="badges">
+          ${s.signed?'<span class="badge ok">signed</span>':'<span class="badge">unsigned</span>'}
+          ${s.anchor?`<span class="badge anchor">${esc(s.anchor.backend)}</span>`:''}
+          ${s.framework?`<span class="badge">${esc(s.framework)}</span>`:''}
+        </div>
+      </div>`).join("") || '<div class="empty" style="margin-top:20px">No sessions yet — run an agent that logs to this DB.</div>';
+    document.querySelectorAll(".sess").forEach(el=>
+      el.onclick=()=>{ current=el.dataset.id; tampering=false;
+        document.querySelectorAll(".sess").forEach(x=>x.classList.toggle("active",x.dataset.id===current));
+        loadSession(current); });
+  }
+  if(initial && rows[0] && !current){
+    current = rows[0].session_id;
+    document.querySelector(`.sess[data-id="${current}"]`)?.classList.add("active");
+    loadSession(current);
+  }
+  document.getElementById("livecount").textContent = rows.length + " session" + (rows.length===1?"":"s");
+  return rows;
 }
 
 function banner(v, note){
@@ -132,6 +152,7 @@ function renderEntries(entries, tamperedSeq){
 }
 
 async function loadSession(id){
+  tampering = false;
   const d = await get("/api/session?id="+encodeURIComponent(id));
   const cp = d.checkpoint, v = d.verification;
   $("#main").innerHTML = `
@@ -159,6 +180,7 @@ async function loadSession(id){
 }
 
 async function tamper(id){
+  tampering = true;
   const t = await get("/api/tamper?id="+encodeURIComponent(id)+"&seq=0");
   const d = await get("/api/session?id="+encodeURIComponent(id));
   const v = t.verification;
@@ -173,7 +195,23 @@ async function tamper(id){
     <details open style="margin-top:16px"><summary>Failing checks</summary>
       <div style="margin-top:8px">${(v.errors||[]).map(c=>`<div class="check fail">${esc(c)}</div>`).join("")}</div></details>`;
 }
-loadSessions();
+// Live: poll for new sessions/events; refresh the open detail unless the user
+// is looking at a tamper result.
+let lastCounts = {};
+async function poll(){
+  try{
+    const rows = await loadSessions(false);
+    if(current && !tampering){
+      const cur = rows.find(r=>r.session_id===current);
+      if(cur && lastCounts[current] !== cur.event_count){  // detail changed -> refresh
+        lastCounts[current] = cur.event_count;
+        loadSession(current);
+      }
+    }
+  }catch(e){/* server momentarily busy; try again next tick */}
+}
+loadSessions(true);
+setInterval(poll, 2000);
 </script>
 </body>
 </html>"""
