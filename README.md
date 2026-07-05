@@ -229,3 +229,57 @@ examples/anchoring_demo.py` shows the full flow.
 | — | AutoGen / OpenAI Agents SDK adapters | ⏳ (OTel exporter already covers any GenAI-instrumented stack) |
 | — | RFC-3161 TSA anchor · forward-secure key ratcheting · dashboard | ⏳ |
 
+## Running it in production
+
+Operational hardening beyond the crypto:
+
+```python
+from agentaudit import AuditLog, SealPolicy, EncryptedFileKeyProvider
+from agentaudit.anchoring import WitnessLog
+
+log = AuditLog(
+    key_provider=EncryptedFileKeyProvider("signing.key.pem"),   # key encrypted at rest, or a KMS
+    seal_policy=SealPolicy(every_n_events=1000, every_seconds=60),  # auto-seal; no manual .seal()
+    auto_anchor=WitnessLog(),                                    # each checkpoint externally anchored
+)
+with log:                      # background sealer runs; a final checkpoint flushes on exit
+    ...                        # log.record(...) as events happen
+```
+
+- **Key management** — signing is done through a `KeyProvider`, so the private key lives in a
+  **password-encrypted file** (0600) or a **KMS/HSM** (subclass `KeyProvider.sign`), never
+  hard-coded or trapped in process memory. See `examples/production_hardening_demo.py`.
+- **Automated sealing** — `SealPolicy` seals every *N* events and/or every *T* seconds on a
+  background thread; the engine and `SQLiteStore` are thread-safe.
+- **Pluggable storage** — `StorageBackend` is a formal interface; `SQLiteStore` (append-only via
+  triggers) is the reference impl, and a Postgres / object-lock (WORM) backend drops in without
+  touching the engine.
+
+## Performance
+
+Recording events is **linear**, not quadratic. An incremental Merkle tree (a Merkle Mountain
+Range frontier) keeps the RFC 6962 root in O(log n) per append, and cached chain state removes
+the old per-append full-log rescan — so per-record time stays flat as the log grows:
+
+```
+   events        per record          rate
+    1,000           26.7 µs      ~37,000 rec/s
+   50,000           26.8 µs      ~37,000 rec/s      ← flat == O(n) ingest
+```
+
+(`python examples/benchmark.py`.) The engine is also thread-safe: concurrent `record()` calls
+serialize on a lock and still produce one valid, contiguous chain. Throughput is now bounded by
+per-record durable storage, not by the crypto.
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest -q            # 86+ tests, incl. RFC 6962 known-answer vectors & tamper detection
+ruff check
+mypy src/agentaudit
+```
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
