@@ -49,3 +49,54 @@ def _first_attr(obj: Any, *names: str) -> Optional[Any]:
     return None
 
 
+def make_step_callback(
+    log: AuditLog,
+    agent_id: str = "crewai-agent",
+    redact_content: bool = True,
+) -> Callable[[Any], None]:
+    """Return a ``step_callback`` that records each agent step / tool use."""
+
+    def _callback(step: Any) -> None:
+        tool = _first_attr(step, "tool")
+        if tool is not None:
+            # An agent action invoking a tool.
+            tool_input = _first_attr(step, "tool_input", "text") or ""
+            log.record(AuditEvent(
+                event_type=EventType.TOOL_CALL,
+                actor=Actor(agent_id=agent_id, framework="crewai"),
+                input={"tool": str(tool),
+                       "args": _content(str(tool_input), redact_content)},
+            ))
+            return
+
+        result = _first_attr(step, "result", "output", "return_values", "text")
+        log.record(AuditEvent(
+            event_type=EventType.DECISION,
+            actor=Actor(agent_id=agent_id, framework="crewai"),
+            output={"step": _content(str(result if result is not None else step),
+                                     redact_content)},
+        ))
+
+    return _callback
+
+
+def make_task_callback(
+    log: AuditLog,
+    agent_id: str = "crewai-agent",
+    redact_content: bool = True,
+) -> Callable[[Any], None]:
+    """Return a ``task_callback`` that records each completed task's output."""
+
+    def _callback(task_output: Any) -> None:
+        raw = _first_attr(task_output, "raw", "result", "output")
+        name = _first_attr(task_output, "name", "description")
+        agent = _first_attr(task_output, "agent") or agent_id
+        log.record(AuditEvent(
+            event_type=EventType.DECISION,
+            actor=Actor(agent_id=str(agent), framework="crewai"),
+            input={"task": str(name)} if name is not None else None,
+            output={"result": _content(str(raw if raw is not None else task_output),
+                                       redact_content)},
+        ))
+
+    return _callback
