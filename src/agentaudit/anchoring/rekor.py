@@ -202,3 +202,49 @@ def verify_set(body: str, integrated_time: int, log_id: str, log_index: int,
         return False
 
 
+def _body_digest(body_b64: str) -> Optional[str]:
+    body = json.loads(base64.b64decode(body_b64))
+    return body.get("spec", {}).get("data", {}).get("hash", {}).get("value")
+
+
+def verify_rekor_receipt(
+    receipt: AnchorReceipt,
+    trusted_rekor_key: Optional[str] = None,
+    online: bool = False,
+    client: Optional[RekorClient] = None,
+) -> bool:
+    """Verify a Rekor receipt.
+
+    Prefers **offline** verification: check the SET against Rekor's log public
+    key and confirm the logged entry commits to our anchored digest -- no
+    network. Pass ``trusted_rekor_key`` (PEM) to pin Sigstore's published log
+    key rather than trusting the key embedded in the receipt (recommended; a
+    key carried inside the thing it vouches for proves nothing on its own).
+
+    Falls back to an online re-fetch when ``online=True`` or the SET material is
+    absent.
+    """
+    if receipt.backend != "rekor":
+        return False
+    p = receipt.proof
+    set_b64, body = p.get("signed_entry_timestamp"), p.get("body")
+    pub_pem = trusted_rekor_key or p.get("rekor_public_key")
+
+    if not online and set_b64 and body and pub_pem:
+        if not verify_set(body, p["integrated_time"], p["log_id"], p["log_index"],
+                          set_b64, pub_pem):
+            return False
+        # Bind the SET-verified entry to the root we anchored.
+        return _body_digest(body) == p.get("digest")
+
+    # Online fallback: re-fetch the entry and match the digest.
+    uuid = p.get("uuid")
+    if not uuid:
+        return False
+    client = client or RekorClient(p.get("rekor_url", DEFAULT_REKOR_URL))
+    try:
+        entry = client.get_entry_by_uuid(uuid)
+    except Exception:
+        return False
+    _, payload = next(iter(entry.items()))
+    return _body_digest(payload["body"]) == p.get("digest")
