@@ -105,13 +105,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--db", default="agentaudit.db", help="SQLite store path (seeded if empty)")
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8000)
+    s.add_argument("--no-seed", action="store_true",
+                   help="don't seed demo data (show only real sessions, e.g. from live_kyc_stream)")
     s.set_defaults(func=_cmd_serve)
     return p
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
     from agentaudit.dashboard.server import serve
-    serve(db_path=args.db, host=args.host, port=args.port)
+    serve(db_path=args.db, host=args.host, port=args.port, seed_if_empty=not args.no_seed)
     return 0
 
 
