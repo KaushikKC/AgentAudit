@@ -81,3 +81,28 @@ class WitnessLog(AnchorBackend):
         )
 
 
+def verify_witness_receipt(
+    receipt: AnchorReceipt,
+    trusted_keys: Optional[Iterable[str]] = None,
+) -> bool:
+    """Verify a witness receipt offline.
+
+    Checks the receipt binds to its root and the witness signature is valid. If
+    ``trusted_keys`` (PEM strings) is provided, additionally require that the
+    witness key is one you trust -- without pinning, a valid signature only
+    proves *someone* signed it, not that it was the real witness.
+    """
+    if receipt.backend != "witness":
+        return False
+    p = receipt.proof
+    stmt = p.get("statement", {})
+    if stmt.get("root_hash") != receipt.root_hash:
+        return False
+    pem = p.get("witness_public_key", "")
+    if trusted_keys is not None and pem.strip() not in {k.strip() for k in trusted_keys}:
+        return False
+    try:
+        vk = VerifyingKey.from_pem(pem.encode())
+        return vk.verify(statement_bytes(stmt), bytes.fromhex(p["signature"]))
+    except Exception:
+        return False
