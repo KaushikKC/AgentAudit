@@ -119,3 +119,45 @@ location the operator can't backdate gives **provable time + third-party non-rep
   when `ANTHROPIC_API_KEY` is set. Validated against real langchain-core 1.4.8; tests in
   `test_integrations.py` (real-dispatch, `importorskip`) + `test_demo_and_controls.py`.
 
+## Tier 2 — production hardening
+
+- ✅ **Key management / KMS** — DONE. `agentaudit.keys.KeyProvider` (sign + public_key_pem, so a
+  KMS that can't export its key still works): `LocalKeyProvider`, `EncryptedFileKeyProvider`
+  (password-encrypted PKCS8 at rest, 0600, password from arg/env), documented KMS subclass path.
+  `AuditLog(key_provider=...)` routes all signing through it.
+- ✅ **Automated sealing policy** — DONE. `SealPolicy(every_n_events, every_seconds)`;
+  synchronous threshold seal + background timer thread; `AuditLog` is a context manager that
+  flushes a final checkpoint on exit. `auto_anchor` anchors each auto-seal.
+- ✅ **Thread-safe storage + formal interface** — DONE. `StorageBackend` ABC; `SQLiteStore` now
+  has an internal lock + `check_same_thread=False`, safe for background sealers and the dashboard.
+  Demo: `examples/production_hardening_demo.py`. Tests: `test_hardening.py`.
+- ⏳ **Postgres + object-store backend** with true WORM (object-lock). Interface is ready
+  (`StorageBackend`) — additive; can't validate here without a live DB.
+- ⏳ **Collector service + HTTP/gRPC API** — architecture diagram shows an out-of-process
+  collector; today it's in-process SDK only. (Dashboard server is a starting point.)
+- ⏳ **Forward-secure key ratcheting** — rotate/erase per-segment key after each seal so a future
+  key compromise can't forge past entries. (KeyProvider interface is the hook.)
+
+## ⏳ Tier 3 — breadth & polish
+
+- **Standalone Rust/Go verifier binary** — the spec's zero-dependency "verify-it-yourself" artifact + perf cred.
+- **JS/TS SDK** for Node agents.
+- **Deeper D2** — more control mappings, per-regulation evidence templates, per-session coverage report.
+- **Docs site** + the 3 evergreen write-ups; **PyPI publish** + versioned releases.
+- **AutoGen / OpenAI Agents SDK** native adapters (OTel exporter already covers them generically).
+- **Retention / legal-hold** semantics; standalone threat-model doc.
+
+---
+
+## Known technical debt (⚠️)
+- Key *rotation* still manual (encrypted-at-rest + KMS path now exist via `KeyProvider`); forward-secure ratcheting not yet built.
+- SQLite triggers are app-level WORM only; real immutability needs object-lock storage.
+- Per-record SQLite commit is now the ingest bottleneck (crypto is O(log n)); batched commits would raise throughput further.
+- Reopened `AuditLog` loads all entries once (O(n)) to rebuild cached state; fine, but not incremental across process restarts.
+- Rekor offline verify checks the SET (Rekor's inclusion promise), not the full inclusion-proof-vs-STH path; production verifiers should pin Sigstore's published Rekor log key rather than the receipt-embedded one.
+
+## Housekeeping
+- No git commit made yet (per standing preference — commit when the user asks).
+- `agentaudit` console script installs to `~/Library/Python/3.12/bin` (not on PATH here) — user-env, not a packaging bug.
+- Build-in-public posts drafted through #8 (thesis, Merkle/CT, honest-scope, D1, D3, meta-lesson,
+  Rekor Ed25519ph→ECDSA debugging, O(n²)→MMR perf fix).
