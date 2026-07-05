@@ -108,3 +108,97 @@ class RekorClient:
         return self._request("POST", "/api/v1/log/entries", json.dumps(entry).encode())
 
 
+class RekorAnchor(AnchorBackend):
+    """Anchor sealed roots to a Rekor transparency log with an ECDSA anchor key.
+
+    Generates a dedicated ECDSA P-256 key by default; pass ``private_key_pem`` to
+    reuse a stable anchor identity across seals.
+    """
+
+    name = "rekor"
+
+    def __init__(
+        self,
+        private_key_pem: Optional[bytes] = None,
+        base_url: str = DEFAULT_REKOR_URL,
+    ) -> None:
+        if private_key_pem is not None:
+            self.key = serialization.load_pem_private_key(private_key_pem, password=None)
+        else:
+            self.key = ec.generate_private_key(ec.SECP256R1())
+        self.client = RekorClient(base_url)
+
+    def private_key_pem(self) -> bytes:
+        return self.key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+
+    def submit(self, checkpoint: Checkpoint) -> AnchorReceipt:
+        statement = checkpoint_statement(checkpoint)
+        digest = hashlib.sha256(statement_bytes(statement)).digest()
+        # hashedrekord logs the digest; ECDSA over the prehashed digest is what
+        # Rekor verifies against the logged sha256 value.
+        signature = self.key.sign(digest, ec.ECDSA(utils.Prehashed(hashes.SHA256())))
+        public_pem = self.key.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+
+        result = self.client.create_hashedrekord(digest.hex(), signature, public_pem)
+        # Response is { "<uuid>": { body, logIndex, integratedTime, logID, verification, ... } }
+        uuid, payload = next(iter(result.items()))
+        integrated = payload.get("integratedTime")
+        anchored_at = (
+            datetime.fromtimestamp(integrated, tz=timezone.utc)
+            .isoformat().replace("+00:00", "Z")
+            if integrated else datetime.now(timezone.utc).isoformat()
+        )
+        set_b64 = (payload.get("verification") or {}).get("signedEntryTimestamp")
+        # Capture the SET material + Rekor's log public key so the receipt is
+        # OFFLINE-verifiable (no re-fetch needed).
+        rekor_pub = None
+        try:
+            rekor_pub = self.client.get_public_key()
+        except Exception:  # pragma: no cover - keep the receipt even if this fails
+            pass
+        return AnchorReceipt(
+            backend=self.name,
+            root_hash=checkpoint.root_hash,
+            anchored_at=anchored_at,
+            proof={
+                "statement": statement,
+                "digest": digest.hex(),
+                "uuid": uuid,
+                "body": payload.get("body"),
+                "log_index": payload.get("logIndex"),
+                "log_id": payload.get("logID"),
+                "integrated_time": integrated,
+                "signed_entry_timestamp": set_b64,
+                "rekor_public_key": rekor_pub,
+                "rekor_url": self.client.base_url,
+            },
+            # Offline-verifiable when we captured the SET + Rekor log key.
+            offline_verifiable=bool(set_b64 and payload.get("body") and rekor_pub),
+        )
+
+
+def verify_set(body: str, integrated_time: int, log_id: str, log_index: int,
+               set_b64: str, rekor_public_key_pem: str) -> bool:
+    """Verify a Rekor Signed Entry Timestamp (SET) -- fully offline.
+
+    The SET is Rekor's ECDSA(P-256) signature over the RFC 8785-canonicalized
+    ``{body, integratedTime, logID, logIndex}``. Verifying it against Rekor's log
+    public key is proof the entry was included, with no network round-trip.
+    """
+    payload = {"body": body, "integratedTime": integrated_time,
+               "logID": log_id, "logIndex": log_index}
+    canon = statement_bytes(payload)  # same canonical JSON Rekor signs
+    pub = serialization.load_pem_public_key(rekor_public_key_pem.encode())
+    try:
+        pub.verify(base64.b64decode(set_b64), canon, ec.ECDSA(hashes.SHA256()))
+        return True
+    except InvalidSignature:
+        return False
+
+
